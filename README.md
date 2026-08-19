@@ -75,12 +75,12 @@ thing and is meant to be loud.
 
 ## Status
 
-Working and tested:  (rules engine, packet, deep read, model adapters, report), the
-CLI's  and  commands, and both reusable workflows. 28 tests, including real HTTP against
+Working and tested: `packages/core` (rules engine, packet, deep read, model adapters, report), the
+CLI's `packet` and `run` commands, and both reusable workflows. 28 tests, including real HTTP against
 stub gateways for both wire formats, because the risky part of an adapter is the wire format and a mock
 of your own assumptions cannot tell you the assumption was wrong.
 
-Verified end to end against a stub gateway: a response containing  had the
+Verified end to end against a stub gateway: a response containing `"verdict": "safe to merge"` had the
 verdict stripped and reported, and a malformed check was dropped and counted. Both degradation paths
 were exercised too - no route, and a dead gateway - and each publishes the deterministic report with
 the reason recorded, exit 0.
