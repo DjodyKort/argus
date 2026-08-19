@@ -1,0 +1,48 @@
+{
+  "$comment": [
+    "An EXAMPLE rule set for the merge-triage task. Copy it into your repo and rewrite it; do not depend",
+    "on this file. Rule sets encode what a specific repo guarantees, which is the one part that must never",
+    "be generic, so they live in the consuming repo rather than here.",
+    "",
+    "Two things that matter more than the patterns:",
+    "  - `why` is read by a human under time pressure. It should say what to check and what breaks if it",
+    "    is wrong. A rule whose `why` restates the file name is worse than no rule, because it adds noise",
+    "    to a report people are meant to trust.",
+    "  - Order carries meaning: first match wins, so specific rules go above general ones.",
+    "",
+    "Err toward listing. A rule you did not need costs a line in a report; a rule you did need costs a",
+    "change nobody looked at."
+  ],
+  "rules": [
+    {
+      "id": "auth",
+      "level": "high",
+      "match": "^src/(auth|permissions|access)/",
+      "why": "Authorisation. Check whether a permission check gained or lost a caller, and whether a new code path reaches data without passing one."
+    },
+    {
+      "id": "migrations",
+      "level": "high",
+      "match": "^src/.*/migrations/",
+      "why": "A migration. Check whether it drops or re-predicates an index your queries depend on: that degrades every query using it without failing a single test."
+    },
+    {
+      "id": "api-surface",
+      "level": "medium",
+      "match": "^(openapi|schema)\\.(json|ya?ml)$",
+      "why": "The API surface changed. A new read endpoint is a new way to reach data; confirm it is covered by whatever asserts your access rules."
+    },
+    {
+      "id": "repositories",
+      "level": "medium",
+      "match": "^src/repositories/",
+      "why": "A data-access layer. Check whether a query that returns records gained or lost a filter, and whether an existing filter is still attached to the query it was written for."
+    },
+    {
+      "id": "services",
+      "level": "low",
+      "match": "^src/services/",
+      "why": "Business logic. Usually benign, but this is where a read path can quietly start returning more than it used to."
+    }
+  ]
+}

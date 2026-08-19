@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/DjodyKort/argus/schemas/packet.schema.json",
+  "title": "Argus work packet",
+  "description": "The contract between the deterministic pre-pass and the model. A packet says what to look at, why it matters, what must remain true, and what shape the answer has to take. It never says what the answer is.\n\nThis is the one interface worth getting right up front: a task is a rule set plus a skill plus a sink, and all three meet here. Everything else in this repo is replaceable.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "task", "scope", "findings", "output"],
+  "properties": {
+    "version": {
+      "const": 1,
+      "description": "Packet format version. Bump only for a breaking change; consumers should refuse a version they do not know."
+    },
+    "task": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$",
+      "description": "Task name, matching a directory under tasks/. Chooses the rule set and the skill."
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "description": "What the packet covers. A range for merge triage, a diff for review, a path set for a sweep.",
+      "properties": {
+        "kind": { "enum": ["range", "diff", "paths"] },
+        "base": { "type": "string", "description": "Range kind: the base ref or sha." },
+        "head": { "type": "string", "description": "Range kind: the head ref or sha." },
+        "baseIsAncestor": {
+          "type": "boolean",
+          "description": "Range kind: whether base is an ancestor of head. False means the range is not purely incoming, because git diff is symmetric and reports the local side's own work too. A consumer that ignores this will report files nobody is about to merge, while looking authoritative."
+        },
+        "commits": { "type": "integer", "minimum": 0 },
+        "fileCount": { "type": "integer", "minimum": 0 },
+        "paths": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "description": "What the deterministic pass concluded. Ordered most severe first. An empty array is a real answer, not a missing one: it means no rule matched, which is different from nothing being wrong.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["level", "why", "files"],
+        "properties": {
+          "level": { "enum": ["high", "medium", "low"] },
+          "rule": { "type": "string", "description": "Id of the rule that matched, so a noisy rule can be found and fixed." },
+          "why": {
+            "type": "string",
+            "description": "What to check and why it matters, written for whoever reads the report. Not a restatement of the file name."
+          },
+          "files": { "type": "array", "minItems": 1, "items": { "type": "string" } }
+        }
+      }
+    },
+    "invariants": {
+      "type": "array",
+      "description": "What must remain true, in the consumer's own words. This is the part a general-purpose model cannot infer and a generic reviewer will miss.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "statement"],
+        "properties": {
+          "id": { "type": "string" },
+          "statement": { "type": "string" },
+          "enforcedBy": {
+            "type": "string",
+            "description": "The gate that already checks this, if any. A model should not spend a turn re-deriving something a test already proves."
+          }
+        }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Hints, not limits. The route decides what it can afford; this says what the task considers enough.",
+      "properties": {
+        "maxFiles": { "type": "integer", "minimum": 1 },
+        "maxTokens": { "type": "integer", "minimum": 1 },
+        "deepReadLevels": {
+          "type": "array",
+          "items": { "enum": ["high", "medium", "low"] },
+          "description": "Which finding levels justify reading the actual diff. Everything else is context, not homework."
+        }
+      }
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["shape"],
+      "description": "The shape the answer must take. `verdict` is deliberately absent from the enum: tasks in this repo propose, they do not decide.",
+      "properties": {
+        "shape": { "enum": ["checklist", "findings", "patch-proposal"] },
+        "sink": { "enum": ["pr-comment", "issue", "artifact"] },
+        "mustNot": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Explicit prohibitions carried to the model, e.g. weakening a gate to make it pass."
+        }
+      }
+    },
+    "meta": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Free-form, for the consumer. Never interpreted by core."
+    }
+  }
+}

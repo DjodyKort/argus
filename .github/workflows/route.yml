@@ -1,0 +1,196 @@
+# Pick a model route, or conclude there isn't one.
+#
+# Reusable across repos:
+#
+#   jobs:
+#     route:
+#       uses: DjodyKort/argus/.github/workflows/route.yml@main
+#       secrets: inherit
+#     triage:
+#       needs: route
+#       if: needs.route.outputs.route != 'none'
+#       runs-on: ${{ needs.route.outputs.runner }}
+#
+# Preference order, cheapest acceptable first:
+#   local-primary    self-hosted runner -> a gateway on 127.0.0.1 (default 8130)
+#                    Intended for a first-party CLI behind an OpenAI-compatible endpoint, i.e. included
+#                    subscription usage rather than a metered pool. Reachable only from that box, which
+#                    is why the runner goes to the gateway instead of the gateway being exposed.
+#   local-fallback   same box, second gateway (default 20128), for when the primary's quota policy
+#                    refuses autonomous work. Being refused is normal operation, not an incident.
+#   api              cloud runner + ANTHROPIC_API_KEY. Works when the house is dark; spends real money.
+#   none             no route. A first-class outcome: the deterministic pass and the repo's own gates
+#                    never depended on a model.
+#
+# Everything probes rather than assumes. A service that is installed is not a service that is running,
+# and a token that authenticates is not a token that draws the pool you expected.
+
+name: Route
+
+on:
+  workflow_call:
+    inputs:
+      runner_label:
+        description: Label identifying the self-hosted runner that can reach the local gateways.
+        type: string
+        required: false
+        default: argus
+      primary_url:
+        description: Liveness URL for the primary local gateway.
+        type: string
+        required: false
+        default: http://127.0.0.1:8130/v1/models
+      fallback_url:
+        description: Liveness URL for the fallback local gateway.
+        type: string
+        required: false
+        default: http://127.0.0.1:20128/v1/models
+    outputs:
+      route:
+        description: local-primary | local-fallback | api | none
+        value: ${{ jobs.decide.outputs.route }}
+      runner:
+        description: The runs-on value the chosen route needs.
+        value: ${{ jobs.decide.outputs.runner }}
+      detail:
+        description: One line on why this route was chosen, for a PR body or a log.
+        value: ${{ jobs.decide.outputs.detail }}
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  select:
+    name: Look for a self-hosted runner
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      self_hosted: ${{ steps.look.outputs.self_hosted }}
+      runner: ${{ steps.look.outputs.runner }}
+      reason: ${{ steps.look.outputs.reason }}
+    steps:
+      # Liveness is checked through the API before anything is pinned to the self-hosted runner: a job
+      # pinned to an offline runner *queues* rather than failing, and timeout-minutes does not help
+      # because that clock only starts once the job starts. Unguarded, a powered-off box parks the
+      # workflow for a day.
+      - name: Query runner status
+        id: look
+        env:
+          # Listing runners needs administration:read, which GITHUB_TOKEN cannot be granted, so this is
+          # an optional fine-grained PAT. Absent, selection degrades to the cloud routes: a missing
+          # secret must never be able to hang a job behind a dead runner.
+          GH_TOKEN: ${{ secrets.RUNNER_STATUS_TOKEN }}
+          LABEL: ${{ inputs.runner_label || 'argus' }}
+        run: |
+          set -uo pipefail
+          emit() {
+            {
+              echo "self_hosted=$1"
+              echo "runner=$2"
+              echo "reason=$3"
+            } >> "$GITHUB_OUTPUT"
+            echo "$3"
+          }
+
+          if [ -z "${GH_TOKEN:-}" ]; then
+            emit false ubuntu-latest "No RUNNER_STATUS_TOKEN, so runner status is unknown; treating the local routes as unavailable."
+            exit 0
+          fi
+
+          if ! runners=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runners" --paginate 2>/dev/null); then
+            emit false ubuntu-latest "Could not list runners (token lacks administration:read, or the API failed); treating the local routes as unavailable."
+            exit 0
+          fi
+
+          online=$(echo "$runners" | jq -r --arg l "$LABEL" \
+            '[.runners[]? | select(.status == "online" and ([.labels[].name] | index($l)))] | length')
+
+          if [ "${online:-0}" -gt 0 ]; then
+            emit true "$LABEL" "Found $online online runner(s) labelled '$LABEL'."
+          else
+            emit false ubuntu-latest "No online runner labelled '$LABEL'."
+          fi
+
+  probe:
+    name: Probe the local gateways
+    needs: select
+    if: ${{ needs.select.outputs.self_hosted == 'true' }}
+    runs-on: ${{ needs.select.outputs.runner }}
+    timeout-minutes: 5
+    # A wedged runner must not take the caller down: this job failing means "local routes unavailable",
+    # which decide handles.
+    continue-on-error: true
+    outputs:
+      primary: ${{ steps.probe.outputs.primary }}
+      fallback: ${{ steps.probe.outputs.fallback }}
+    steps:
+      - name: Curl each gateway
+        id: probe
+        env:
+          PRIMARY_URL: ${{ inputs.primary_url || 'http://127.0.0.1:8130/v1/models' }}
+          FALLBACK_URL: ${{ inputs.fallback_url || 'http://127.0.0.1:20128/v1/models' }}
+        run: |
+          set -uo pipefail
+          # Any HTTP answer counts as alive, 401 and 404 included: this is liveness, not auth. A closed
+          # port answers 000, which is the case being distinguished.
+          check() { curl -s -o /dev/null -m 5 -w '%{http_code}' "$1" || echo 000; }
+
+          primary=$(check "$PRIMARY_URL")
+          fallback=$(check "$FALLBACK_URL")
+          echo "primary  http=$primary"
+          echo "fallback http=$fallback"
+
+          {
+            [ "$primary" != "000" ] && echo "primary=true" || echo "primary=false"
+            [ "$fallback" != "000" ] && echo "fallback=true" || echo "fallback=false"
+          } >> "$GITHUB_OUTPUT"
+
+  decide:
+    name: Decide
+    needs: [select, probe]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      route: ${{ steps.decide.outputs.route }}
+      runner: ${{ steps.decide.outputs.runner }}
+      detail: ${{ steps.decide.outputs.detail }}
+    steps:
+      - name: Choose
+        id: decide
+        env:
+          SELF_HOSTED: ${{ needs.select.outputs.self_hosted }}
+          SELECT_REASON: ${{ needs.select.outputs.reason }}
+          PRIMARY: ${{ needs.probe.outputs.primary }}
+          FALLBACK: ${{ needs.probe.outputs.fallback }}
+          LABEL: ${{ inputs.runner_label || 'argus' }}
+          HAS_API_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+        run: |
+          set -uo pipefail
+          choose() {
+            {
+              echo "route=$1"
+              echo "runner=$2"
+              echo "detail=$3"
+            } >> "$GITHUB_OUTPUT"
+            echo "route=$1 runner=$2"
+            echo "$3"
+          }
+
+          if [ "$SELF_HOSTED" = 'true' ] && [ "${PRIMARY:-false}" = 'true' ]; then
+            choose local-primary "$LABEL" "The primary local gateway answered. Verify at runtime that the turn drew the pool you expected; an endpoint answering is not proof of that."
+            exit 0
+          fi
+
+          if [ "$SELF_HOSTED" = 'true' ] && [ "${FALLBACK:-false}" = 'true' ]; then
+            choose local-fallback "$LABEL" "The primary local gateway did not answer; the fallback gateway did."
+            exit 0
+          fi
+
+          if [ "$HAS_API_KEY" = 'true' ]; then
+            choose api ubuntu-latest "No local gateway available ($SELECT_REASON), falling back to the metered API, which costs money."
+            exit 0
+          fi
+
+          choose none ubuntu-latest "No model route available ($SELECT_REASON) and no ANTHROPIC_API_KEY. The deterministic pass and the repo's gates are unaffected."
