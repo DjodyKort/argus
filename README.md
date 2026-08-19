@@ -75,8 +75,15 @@ thing and is meant to be loud.
 
 ## Status
 
-Scaffold. `packages/core` and the CLI work and are tested (`npm test`); `route.yml` is reusable and its
-degraded path is verified end to end. Not yet built: the task runner that takes a packet plus a skill
-and produces a report, and the sinks. The plugin/registry layer is deliberately absent until a second
-real task exists - two instances is when the shape becomes knowable, and one instance is when it
-becomes guesswork.
+Working and tested:  (rules engine, packet, deep read, model adapters, report), the
+CLI's  and  commands, and both reusable workflows. 28 tests, including real HTTP against
+stub gateways for both wire formats, because the risky part of an adapter is the wire format and a mock
+of your own assumptions cannot tell you the assumption was wrong.
+
+Verified end to end against a stub gateway: a response containing  had the
+verdict stripped and reported, and a malformed check was dropped and counted. Both degradation paths
+were exercised too - no route, and a dead gateway - and each publishes the deterministic report with
+the reason recorded, exit 0.
+
+Not yet built: the issue sink, and any plugin or registry layer. That last one waits for a second real
+task, because two instances is when the shape becomes knowable and one is when it becomes guesswork.

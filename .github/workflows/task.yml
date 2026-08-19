@@ -1,0 +1,179 @@
+# Run an argus task: route -> packet -> model -> sink.
+#
+# Reusable from any repo:
+#
+#   jobs:
+#     triage:
+#       uses: DjodyKort/argus/.github/workflows/task.yml@main
+#       with:
+#         task: merge-triage
+#         rules: _fork/argus-rules.json
+#         config: _fork/argus.config.json
+#         head: upstream/main
+#         sink: pr-comment
+#         pr_number: ${{ github.event.pull_request.number }}
+#       secrets: inherit
+#
+# `rules` and `config` are paths in the *calling* repo, because that is where repo-specific knowledge
+# belongs. The skill defaults to the one shipped with the task, and can be overridden by a path in the
+# calling repo.
+#
+# This never fails the caller on account of a model. A refused quota, a dead gateway or no route at all
+# all end with the deterministic report being published and the reason recorded in it. The only failures
+# here are a bad invocation or a broken sink.
+
+name: Task
+
+on:
+  workflow_call:
+    inputs:
+      task:
+        type: string
+        required: true
+      rules:
+        description: Path in the calling repo to the rule set.
+        type: string
+        required: true
+      config:
+        description: Path in the calling repo to the argus config (invariants, budget, output).
+        type: string
+        required: false
+        default: ''
+      skill:
+        description: Path in the calling repo to a skill override. Defaults to the task's own skill.
+        type: string
+        required: false
+        default: ''
+      base:
+        type: string
+        required: false
+        default: ''
+      head:
+        type: string
+        required: false
+        default: upstream/main
+      upstream_remote:
+        description: Remote URL to add as `upstream` and fetch, when head refers to it.
+        type: string
+        required: false
+        default: ''
+      sink:
+        description: pr-comment | artifact
+        type: string
+        required: false
+        default: artifact
+      pr_number:
+        type: string
+        required: false
+        default: ''
+      argus_ref:
+        description: Ref of DjodyKort/argus to run. Pin this for reproducibility.
+        type: string
+        required: false
+        default: main
+      runner_label:
+        type: string
+        required: false
+        default: argus
+      model:
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  route:
+    uses: DjodyKort/argus/.github/workflows/route.yml@main
+    with:
+      runner_label: ${{ inputs.runner_label }}
+    secrets: inherit
+
+  run:
+    name: ${{ inputs.task }}
+    needs: route
+    runs-on: ${{ needs.route.outputs.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Check out the calling repository
+        uses: actions/checkout@v6
+        with:
+          # Full history: the packet's range is a merge-base, which a shallow clone cannot compute.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out argus
+        uses: actions/checkout@v6
+        with:
+          repository: DjodyKort/argus
+          ref: ${{ inputs.argus_ref }}
+          path: .argus
+          persist-credentials: false
+
+      - name: Set up node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Fetch upstream
+        if: ${{ inputs.upstream_remote != '' }}
+        run: |
+          set -euo pipefail
+          git remote get-url upstream >/dev/null 2>&1 || git remote add upstream "${{ inputs.upstream_remote }}"
+          git fetch -q upstream
+
+      - name: Build the packet
+        run: |
+          set -euo pipefail
+          node .argus/bin/argus.mjs packet \
+            --task '${{ inputs.task }}' \
+            --rules '${{ inputs.rules }}' \
+            ${{ inputs.config != '' && format('--config ''{0}''', inputs.config) || '' }} \
+            ${{ inputs.base != '' && format('--base ''{0}''', inputs.base) || '' }} \
+            --head '${{ inputs.head }}' \
+            --json --out packet.json
+
+      - name: Run the task
+        env:
+          # Only one of these is set, depending on the route. Absent for a local gateway that needs no key.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ARGUS_BASE_URL: ${{ needs.route.outputs.route == 'local-fallback' && 'http://127.0.0.1:20128' || 'http://127.0.0.1:8130' }}
+          ARGUS_MODEL: ${{ inputs.model }}
+        run: |
+          set -euo pipefail
+          skill='${{ inputs.skill }}'
+          if [ -z "$skill" ]; then
+            skill=".argus/tasks/${{ inputs.task }}/skill.md"
+          fi
+          # The metered route talks to Anthropic directly, so it must not inherit a localhost base URL.
+          if [ '${{ needs.route.outputs.route }}' = 'api' ]; then
+            unset ARGUS_BASE_URL
+          fi
+          node .argus/bin/argus.mjs run \
+            --packet packet.json \
+            --skill "$skill" \
+            --route '${{ needs.route.outputs.route }}' \
+            --detail '${{ needs.route.outputs.detail }}' \
+            --out report.md
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish to the pull request
+        if: ${{ inputs.sink == 'pr-comment' && inputs.pr_number != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh pr comment '${{ inputs.pr_number }}' --body-file report.md
+
+      - name: Upload the report
+        if: ${{ inputs.sink != 'pr-comment' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: argus-${{ inputs.task }}
+          path: |
+            report.md
+            packet.json
+          retention-days: 30
