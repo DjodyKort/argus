@@ -121,21 +121,34 @@ jobs:
 
       - name: Fetch upstream
         if: ${{ inputs.upstream_remote != '' }}
+        env:
+          UPSTREAM_REMOTE: ${{ inputs.upstream_remote }}
         run: |
           set -euo pipefail
-          git remote get-url upstream >/dev/null 2>&1 || git remote add upstream "${{ inputs.upstream_remote }}"
+          git remote get-url upstream >/dev/null 2>&1 || git remote add upstream "$UPSTREAM_REMOTE"
           git fetch -q upstream
 
+      # Everything reaches the shell through env, never through ${{ }} inside the script. An interpolated
+      # value is pasted in as source, so a single apostrophe in it ends the quoting and the rest of the
+      # string becomes commands: a route detail containing "the repo's gates" broke exactly this way, and
+      # the same hole is how a workflow gets an arbitrary string executed.
       - name: Build the packet
+        env:
+          TASK: ${{ inputs.task }}
+          RULES: ${{ inputs.rules }}
+          CONFIG: ${{ inputs.config }}
+          BASE: ${{ inputs.base }}
+          HEAD_REF: ${{ inputs.head }}
         run: |
           set -euo pipefail
-          node .argus/bin/argus.mjs packet \
-            --task '${{ inputs.task }}' \
-            --rules '${{ inputs.rules }}' \
-            ${{ inputs.config != '' && format('--config ''{0}''', inputs.config) || '' }} \
-            ${{ inputs.base != '' && format('--base ''{0}''', inputs.base) || '' }} \
-            --head '${{ inputs.head }}' \
-            --json --out packet.json
+          args=(--task "$TASK" --rules "$RULES" --head "$HEAD_REF" --json --out packet.json)
+          if [ -n "$CONFIG" ]; then
+            args+=(--config "$CONFIG")
+          fi
+          if [ -n "$BASE" ]; then
+            args+=(--base "$BASE")
+          fi
+          node .argus/bin/argus.mjs packet "${args[@]}"
 
       - name: Run the task
         env:
@@ -143,21 +156,25 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ARGUS_BASE_URL: ${{ needs.route.outputs.route == 'local-fallback' && 'http://127.0.0.1:20128' || 'http://127.0.0.1:8130' }}
           ARGUS_MODEL: ${{ inputs.model }}
+          TASK: ${{ inputs.task }}
+          SKILL: ${{ inputs.skill }}
+          ROUTE: ${{ needs.route.outputs.route }}
+          DETAIL: ${{ needs.route.outputs.detail }}
         run: |
           set -euo pipefail
-          skill='${{ inputs.skill }}'
+          skill="$SKILL"
           if [ -z "$skill" ]; then
-            skill=".argus/tasks/${{ inputs.task }}/skill.md"
+            skill=".argus/tasks/${TASK}/skill.md"
           fi
           # The metered route talks to Anthropic directly, so it must not inherit a localhost base URL.
-          if [ '${{ needs.route.outputs.route }}' = 'api' ]; then
+          if [ "$ROUTE" = 'api' ]; then
             unset ARGUS_BASE_URL
           fi
           node .argus/bin/argus.mjs run \
             --packet packet.json \
             --skill "$skill" \
-            --route '${{ needs.route.outputs.route }}' \
-            --detail '${{ needs.route.outputs.detail }}' \
+            --route "$ROUTE" \
+            --detail "$DETAIL" \
             --out report.md
           cat report.md >> "$GITHUB_STEP_SUMMARY"
 
@@ -166,7 +183,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh pr comment '${{ inputs.pr_number }}' --body-file report.md
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: gh pr comment "$PR_NUMBER" --body-file report.md
 
       - name: Upload the report
         if: ${{ inputs.sink != 'pr-comment' }}
