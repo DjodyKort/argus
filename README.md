@@ -73,6 +73,46 @@ Add `--json` for a packet a task can consume, `--out <file>` to write it. Exit c
 findings - this reports, it does not gate. Exit 2 means the invocation was wrong, which is a different
 thing and is meant to be loud.
 
+## Pushing from a workflow
+
+No task here pushes yet, and the moment one does — an improvement pass that commits a fix, a codemod
+that opens a branch — it will hit this, so it is written down before it costs anyone else four attempts.
+
+**Two credentials competing over one push is the whole problem.** `actions/checkout` configures an
+Authorization header for the job's GitHub App token. Supplying your own token does not replace it:
+
+| attempt | result |
+|---|---|
+| token in the push URL | silently outranked; a header beats userinfo, so the push goes out as the App |
+| `git config --unset http.https://github.com/.extraheader` | matches nothing; checkout@v6 wires credentials in through `includeIf`, not as a key in the local config |
+| `git -c http…extraheader=…` alongside it | `remote: Duplicate header: "Authorization"`, HTTP 400 |
+| **checkout stores none, you supply exactly one** | works |
+
+So:
+
+```yaml
+- uses: actions/checkout@v6
+  with:
+    persist-credentials: false
+```
+
+```bash
+auth_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+git -c http.https://github.com/.extraheader="$auth_header" push origin "$branch"
+```
+
+Fetching a public repository unauthenticated is fine, so removing checkout's credential costs nothing.
+
+**And know which token you need.** `GITHUB_TOKEN` may not create or update anything under
+`.github/workflows`, and there is no `workflows` permission a workflow can grant itself, so no
+`permissions:` block fixes it. Pushing a change that touches a workflow file needs a PAT with
+Workflows: write, or a GitHub App installation token. Detect that case *before* pushing and say so:
+the bare failure is `error: failed to push some refs`, which gives no hint that the cause is a
+permission GitHub will never grant.
+
+The generalisable lesson: **when an authentication failure names a credential you did not choose, stop
+trying to out-argue the one already there and remove it.**
+
 ## Status
 
 Working and tested: `packages/core` (rules engine, packet, deep read, model adapters, report), the
